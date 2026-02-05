@@ -519,6 +519,7 @@
 .voice-option .name {
   font-weight: 500;
   font-size: 14px;
+  color: var(--text);
 }
 
 .voice-option .desc {
@@ -556,6 +557,7 @@
   font-weight: 500;
   font-size: 14px;
   margin-bottom: 4px;
+  color: var(--text);
 }
 
 .encoding-option .desc {

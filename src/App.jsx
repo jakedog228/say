@@ -149,7 +149,7 @@ function App() {
     const saved = localStorage.getItem('say-theme')
     if (saved) return saved
     if (window.matchMedia('(prefers-color-scheme: dark)').matches) return 'midnight'
-    return 'light'
+    return 'dusk'
   })
 
   // Settings
