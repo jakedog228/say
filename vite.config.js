@@ -25,9 +25,15 @@ export default defineConfig({
             purpose: 'any'
           },
           {
-            src: 'favicon.svg',
-            sizes: '192x192',
-            type: 'image/svg+xml',
+            src: 'favicon.png',
+            sizes: '200x200',
+            type: 'image/png',
+            purpose: 'any'
+          },
+          {
+            src: 'favicon.png',
+            sizes: '200x200',
+            type: 'image/png',
             purpose: 'maskable'
           }
         ],
@@ -40,7 +46,8 @@ export default defineConfig({
             title: 'title',
             text: 'text'
           }
-        }
+        },
+        categories: ['news', 'education']
       },
       workbox: {
         globPatterns: ['**/*.{js,css,html,ico,svg,woff2}'],

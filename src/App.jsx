@@ -210,6 +210,9 @@ function App() {
   const currentEncodingRef = useRef('MP3')  // Track encoding requested
   const detectedFormatRef = useRef(null)     // Track what the API actually returned
   const [useNativeAudio, setUseNativeAudio] = useState(false)
+  const wakeLockRef = useRef(null)
+  const [wasInterrupted, setWasInterrupted] = useState(false)
+  const wasPlayingBeforeInterruption = useRef(false)
 
   const BUFFER_BEFORE_PLAY = 5  // Wait for N audio segments before starting
   const CROSSFADE_DURATION = 0.005  // 5ms crossfade to eliminate clicks at buffer boundaries
@@ -240,15 +243,41 @@ function App() {
   // Handle share target (PWA)
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
-    const sharedUrl = params.get('url') || params.get('text')
-    if (sharedUrl) {
-      // Extract URL from shared text if needed
-      const urlMatch = sharedUrl.match(/https?:\/\/[^\s]+/)
+
+    // Log all parameters for debugging
+    console.log('Share target params:', Object.fromEntries(params.entries()))
+
+    const sharedUrl = params.get('url')
+    const sharedText = params.get('text')
+    const sharedTitle = params.get('title')
+
+    console.log('Shared URL:', sharedUrl)
+    console.log('Shared text:', sharedText)
+    console.log('Shared title:', sharedTitle)
+
+    let targetUrl = null
+
+    // First try direct URL parameter
+    if (sharedUrl && sharedUrl.match(/https?:\/\/.*substack\./)) {
+      targetUrl = sharedUrl
+    }
+    // Then try extracting from text
+    else if (sharedText) {
+      const urlMatch = sharedText.match(/(https?:\/\/[^\s]+)/g)
       if (urlMatch) {
-        setUrl(urlMatch[0])
-        // Clear the URL params
-        window.history.replaceState({}, '', window.location.pathname)
+        // Find Substack URL specifically
+        const substackUrl = urlMatch.find(url => url.includes('substack.'))
+        targetUrl = substackUrl || urlMatch[0]
       }
+    }
+
+    if (targetUrl) {
+      console.log('Setting URL to:', targetUrl)
+      setUrl(targetUrl)
+      // Clear the URL params after a short delay to allow processing
+      setTimeout(() => {
+        window.history.replaceState({}, '', window.location.pathname)
+      }, 100)
     }
   }, [])
 
@@ -275,6 +304,8 @@ function App() {
     setHasAudioContext(false)
     setUseNativeAudio(false)
     setIsCancelling(false)
+    setWasInterrupted(false)
+    wasPlayingBeforeInterruption.current = false
 
     // Clean up any existing audio
     if (audioContextRef.current) {
@@ -333,6 +364,54 @@ function App() {
     }
     return audioContextRef.current
   }, [])
+
+  // Manage screen wake lock to prevent sleep during playback
+  const manageWakeLock = useCallback(async (shouldLock) => {
+    if ('wakeLock' in navigator) {
+      try {
+        if (shouldLock && !wakeLockRef.current) {
+          wakeLockRef.current = await navigator.wakeLock.request('screen')
+          console.log('Screen wake lock acquired')
+        } else if (!shouldLock && wakeLockRef.current) {
+          wakeLockRef.current.release()
+          wakeLockRef.current = null
+          console.log('Screen wake lock released')
+        }
+      } catch (err) {
+        console.log('Wake lock error:', err)
+      }
+    }
+  }, [])
+
+  // Update Media Session API with current article metadata
+  const updateMediaSession = useCallback((article, isPlaying, currentTime, duration) => {
+    if ('mediaSession' in navigator && article) {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: article.title,
+        artist: 'Say Audio',
+        album: article.subtitle || 'Substack Article',
+        artwork: [
+          { src: '/favicon-192.png', sizes: '192x192', type: 'image/png' },
+          { src: '/favicon-512.png', sizes: '512x512', type: 'image/png' }
+        ]
+      })
+
+      // Set playback state
+      navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused'
+
+      // Set position state for seek controls
+      if (duration && isFinite(duration)) {
+        navigator.mediaSession.setPositionState({
+          duration: duration,
+          playbackRate: 1,
+          position: currentTime || 0
+        })
+      }
+    }
+
+    // Manage wake lock
+    manageWakeLock(isPlaying)
+  }, [manageWakeLock])
 
   // Apply short fade-in/fade-out to an AudioBuffer to eliminate clicks at boundaries
   const applyFades = (audioBuffer) => {
@@ -396,8 +475,12 @@ function App() {
 
     isPlayingRef.current = true
     setIsPlaying(true)
+
+    // Initialize media session
+    updateMediaSession(article, true, 0, totalDurationRef.current)
+
     updatePlaybackTime()
-  }, [playBuffer])
+  }, [playBuffer, updateMediaSession, article])
 
   // Convert LINEAR16 (16-bit signed PCM) to AudioBuffer
   const pcmToAudioBuffer = useCallback((pcmData, ctx) => {
@@ -463,17 +546,20 @@ function App() {
     setCurrentTime(currentPlayTime)
     setDuration(totalDur)
 
+    // Update media session position during Web Audio playback
+    updateMediaSession(article, true, currentPlayTime, totalDur)
 
     // Detect when all scheduled Web Audio buffers have finished playing
     if (scheduledEndTimeRef.current > 0 &&
         audioContextRef.current.currentTime > scheduledEndTimeRef.current + 0.5) {
       setIsPlaying(false)
       isPlayingRef.current = false
+      updateMediaSession(article, false, currentPlayTime, totalDur)
       return  // Stop RAF loop - user can hit play to switch to native audio
     }
 
     animationFrameRef.current = requestAnimationFrame(updatePlaybackTime)
-  }, [])
+  }, [updateMediaSession, article])
 
 
   const startTTS = async () => {
@@ -652,6 +738,7 @@ function App() {
     }
   }
 
+
   // Switch to native HTML5 audio for seeking/replay. Called lazily, not on generation complete.
   const switchToNativeAudio = useCallback((blob, seekTo = 0) => {
     // Stop Web Audio API if still running
@@ -674,7 +761,8 @@ function App() {
     const handleTimeUpdate = () => {
       const currentPlayTime = audio.currentTime
       setCurrentTime(currentPlayTime)
-
+      // Update media session position
+      updateMediaSession(article, true, currentPlayTime, audio.duration)
     }
 
     audio.addEventListener('timeupdate', handleTimeUpdate)
@@ -686,25 +774,59 @@ function App() {
         audio.currentTime = Math.min(seekTo, dur)
       }
       audio.play()
+      // Update media session when metadata loads
+      updateMediaSession(article, true, audio.currentTime, dur)
     })
 
     audio.addEventListener('ended', () => {
       setIsPlaying(false)
       isPlayingRef.current = false
+      updateMediaSession(article, false, audio.duration, audio.duration)
     })
 
     audio.addEventListener('play', () => {
       setIsPlaying(true)
       isPlayingRef.current = true
+      setWasInterrupted(false)
+      wasPlayingBeforeInterruption.current = false
+      updateMediaSession(article, true, audio.currentTime, audio.duration)
     })
 
     audio.addEventListener('pause', () => {
       setIsPlaying(false)
       isPlayingRef.current = false
+      updateMediaSession(article, false, audio.currentTime, audio.duration)
+    })
+
+    // Handle interruptions for native audio
+    audio.addEventListener('stalled', () => {
+      if (isPlaying) {
+        wasPlayingBeforeInterruption.current = true
+        setWasInterrupted(true)
+      }
+    })
+
+    audio.addEventListener('waiting', () => {
+      if (isPlaying) {
+        wasPlayingBeforeInterruption.current = true
+        setWasInterrupted(true)
+      }
+    })
+
+    audio.addEventListener('canplaythrough', () => {
+      // Audio can play again after interruption
+      if (wasInterrupted && wasPlayingBeforeInterruption.current && !isPlaying) {
+        audio.play().then(() => {
+          setWasInterrupted(false)
+          wasPlayingBeforeInterruption.current = false
+        }).catch(err => {
+          console.log('Could not auto-resume after audio interruption:', err)
+        })
+      }
     })
 
     setUseNativeAudio(true)
-  }, [])
+  }, [updateMediaSession, article, wasInterrupted, isPlaying])
 
   const cancelGeneration = () => {
     // Set cancelling flag - we'll abort after current chunk completes
@@ -774,6 +896,113 @@ function App() {
     URL.revokeObjectURL(url)
   }
 
+  // Setup Media Session API action handlers
+  useEffect(() => {
+    if ('mediaSession' in navigator) {
+      navigator.mediaSession.setActionHandler('play', () => {
+        togglePlayPause()
+      })
+
+      navigator.mediaSession.setActionHandler('pause', () => {
+        togglePlayPause()
+      })
+
+      navigator.mediaSession.setActionHandler('seekto', (details) => {
+        if (useNativeAudio && audioElementRef.current && details.seekTime) {
+          audioElementRef.current.currentTime = details.seekTime
+        } else if (audioBlob && !isGenerating) {
+          switchToNativeAudio(audioBlob, details.seekTime)
+        }
+      })
+
+      navigator.mediaSession.setActionHandler('seekbackward', (details) => {
+        const skipTime = details.seekOffset || 10
+        if (useNativeAudio && audioElementRef.current) {
+          audioElementRef.current.currentTime = Math.max(0, audioElementRef.current.currentTime - skipTime)
+        }
+      })
+
+      navigator.mediaSession.setActionHandler('seekforward', (details) => {
+        const skipTime = details.seekOffset || 10
+        if (useNativeAudio && audioElementRef.current) {
+          audioElementRef.current.currentTime = Math.min(audioElementRef.current.duration, audioElementRef.current.currentTime + skipTime)
+        }
+      })
+    }
+  }, [togglePlayPause, switchToNativeAudio, useNativeAudio, audioBlob, isGenerating])
+
+  // Handle page visibility changes for wake lock and audio interruptions
+  useEffect(() => {
+    const handleVisibilityChange = async () => {
+      if (document.hidden) {
+        // Page hidden, release wake lock
+        if (wakeLockRef.current) {
+          wakeLockRef.current.release()
+          wakeLockRef.current = null
+        }
+
+        // Track if we were playing when page became hidden
+        if (isPlaying) {
+          wasPlayingBeforeInterruption.current = true
+          setWasInterrupted(true)
+        }
+      } else if (!document.hidden) {
+        // Page visible again
+        if (isPlaying) {
+          // Currently playing, reacquire wake lock
+          manageWakeLock(true)
+        } else if (wasInterrupted && wasPlayingBeforeInterruption.current) {
+          // Page became visible and we were interrupted, try to resume
+          try {
+            await togglePlayPause()
+            setWasInterrupted(false)
+            wasPlayingBeforeInterruption.current = false
+          } catch (err) {
+            console.log('Could not auto-resume after interruption:', err)
+          }
+        }
+      }
+    }
+
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange)
+  }, [isPlaying, wasInterrupted, manageWakeLock, togglePlayPause])
+
+  // Handle audio context state changes (interruptions)
+  useEffect(() => {
+    const handleContextStateChange = () => {
+      if (audioContextRef.current) {
+        const state = audioContextRef.current.state
+
+        if (state === 'interrupted' || state === 'suspended') {
+          if (isPlaying) {
+            wasPlayingBeforeInterruption.current = true
+            setWasInterrupted(true)
+            setIsPlaying(false)
+            isPlayingRef.current = false
+            cancelAnimationFrame(animationFrameRef.current)
+          }
+        } else if (state === 'running' && wasInterrupted && wasPlayingBeforeInterruption.current) {
+          // Audio context resumed, try to resume playback
+          setIsPlaying(true)
+          isPlayingRef.current = true
+          updatePlaybackTime()
+          setWasInterrupted(false)
+          wasPlayingBeforeInterruption.current = false
+        }
+      }
+    }
+
+    if (audioContextRef.current) {
+      audioContextRef.current.addEventListener('statechange', handleContextStateChange)
+      return () => {
+        if (audioContextRef.current) {
+          audioContextRef.current.removeEventListener('statechange', handleContextStateChange)
+        }
+      }
+    }
+  }, [isPlaying, wasInterrupted, updatePlaybackTime])
+
   // Cleanup on unmount
   useEffect(() => {
     return () => {
@@ -786,6 +1015,10 @@ function App() {
       if (audioElementRef.current) {
         audioElementRef.current.pause()
         audioElementRef.current.src = ''
+      }
+      if (wakeLockRef.current) {
+        wakeLockRef.current.release()
+        wakeLockRef.current = null
       }
     }
   }, [])
@@ -922,6 +1155,24 @@ function App() {
                 </button>
               </div>
             </div>
+
+            {/* Debug share functionality in development */}
+            {process.env.NODE_ENV === 'development' && (
+              <div className="input-group">
+                <label>Test Share Target</label>
+                <button
+                  className="btn btn-ghost"
+                  onClick={() => {
+                    const testUrl = 'https://example.substack.com/p/test-article'
+                    const testParams = `?url=${encodeURIComponent(testUrl)}&title=${encodeURIComponent('Test Article')}&text=${encodeURIComponent(`Check out this article: ${testUrl}`)}`
+                    window.history.pushState({}, '', testParams)
+                    window.location.reload()
+                  }}
+                >
+                  Test Share Params
+                </button>
+              </div>
+            )}
           </div>
         )}
       </div>
