@@ -11,6 +11,7 @@
   /* Structure */
   --border: #E8E4DE;
   --accent: #8B7355;
+  --accent-rgb: 139, 115, 85;
   --accent-light: #F0EBE4;
 
   /* Shadows */
@@ -36,6 +37,7 @@
   --text-muted: #A8A299;
   --border: #4A443B;
   --accent: #C4A882;
+  --accent-rgb: 196, 168, 130;
   --accent-light: #4A443B;
 }
 
@@ -47,6 +49,7 @@
   --text-muted: #9BA1AD;
   --border: #3A3E48;
   --accent: #8B9DC3;
+  --accent-rgb: 139, 157, 195;
   --accent-light: #3A3E48;
 }
 

@@ -194,7 +194,7 @@ export default async function handler(req, res) {
           if (!checkDisconnected()) {
             try {
               res.write(text)
-            } catch (e) {
+            } catch {
               // Client disconnected mid-write, mark as disconnected
               clientDisconnected = true
             }
@@ -216,7 +216,7 @@ export default async function handler(req, res) {
             res.write('\n')
           }
           res.write(JSON.stringify({ chunkComplete: i + 1, totalChunks: chunks.length }) + '\n')
-        } catch (e) {
+        } catch {
           clientDisconnected = true
           break
         }
@@ -225,7 +225,7 @@ export default async function handler(req, res) {
         console.error(`Error processing chunk ${i + 1}:`, chunkError)
         try {
           res.write(JSON.stringify({ error: `Chunk ${i + 1} error: ${chunkError.message}` }) + '\n')
-        } catch (e) {
+        } catch {
           clientDisconnected = true
           break
         }
@@ -235,7 +235,7 @@ export default async function handler(req, res) {
     // Always try to end the response
     try {
       res.end()
-    } catch (e) {
+    } catch {
       // Already closed, ignore
     }
 

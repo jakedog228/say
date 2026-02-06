@@ -33,6 +33,18 @@ const ChevronIcon = ({ open }) => (
   </svg>
 )
 
+const CloseIcon = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="20" height="20">
+    <path d="M18 6L6 18M6 6l12 12"/>
+  </svg>
+)
+
+const ExpandIcon = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16">
+    <path d="M8 3H5a2 2 0 00-2 2v3m18 0V5a2 2 0 00-2-2h-3m0 18h3a2 2 0 002-2v-3M3 16v3a2 2 0 002 2h3"/>
+  </svg>
+)
+
 const HeadphonesIcon = () => (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="48" height="48">
     <path d="M3 18v-6a9 9 0 0118 0v6"/>
@@ -162,6 +174,11 @@ function App() {
     localStorage.getItem('say-audio-encoding') || 'MP3'
   )
   const [showSettings, setShowSettings] = useState(false)
+
+  // Modal and text display
+  const [showArticleModal, setShowArticleModal] = useState(false)
+  const [currentChunkIndex, setCurrentChunkIndex] = useState(-1)
+  const [textChunks, setTextChunks] = useState([])
 
   // Article state
   const [url, setUrl] = useState('')
@@ -417,6 +434,99 @@ function App() {
     animationFrameRef.current = requestAnimationFrame(updatePlaybackTime)
   }, [])
 
+  // Function to split text into chunks (matching backend logic)
+  const chunkText = (text) => {
+    const MAX_CHUNK_SIZE = 1900
+    const chunks = []
+    const paragraphs = text.split(/\n\n+/)
+    let currentChunk = ''
+
+    for (const paragraph of paragraphs) {
+      const trimmedPara = paragraph.trim()
+      if (!trimmedPara) continue
+
+      if (currentChunk.length + trimmedPara.length + 2 > MAX_CHUNK_SIZE) {
+        if (currentChunk.trim()) {
+          chunks.push(currentChunk.trim())
+          currentChunk = ''
+        }
+
+        if (trimmedPara.length > MAX_CHUNK_SIZE) {
+          const subChunks = chunkLongParagraph(trimmedPara)
+          chunks.push(...subChunks)
+        } else {
+          currentChunk = trimmedPara
+        }
+      } else {
+        currentChunk += (currentChunk ? '\n\n' : '') + trimmedPara
+      }
+    }
+
+    if (currentChunk.trim()) {
+      chunks.push(currentChunk.trim())
+    }
+
+    return chunks
+  }
+
+  const chunkLongParagraph = (paragraph) => {
+    const MAX_CHUNK_SIZE = 1900
+    const chunks = []
+    const sentences = paragraph.match(/[^.!?]+[.!?]+[\s]*/g) || [paragraph]
+    let currentChunk = ''
+
+    for (const sentence of sentences) {
+      const trimmedSentence = sentence.trim()
+      if (!trimmedSentence) continue
+
+      if (currentChunk.length + trimmedSentence.length + 1 > MAX_CHUNK_SIZE) {
+        if (currentChunk.trim()) {
+          chunks.push(currentChunk.trim())
+          currentChunk = ''
+        }
+
+        if (trimmedSentence.length > MAX_CHUNK_SIZE) {
+          const wordChunks = chunkByWords(trimmedSentence)
+          chunks.push(...wordChunks)
+        } else {
+          currentChunk = trimmedSentence
+        }
+      } else {
+        currentChunk += (currentChunk ? ' ' : '') + trimmedSentence
+      }
+    }
+
+    if (currentChunk.trim()) {
+      chunks.push(currentChunk.trim())
+    }
+
+    return chunks
+  }
+
+  const chunkByWords = (text) => {
+    const MAX_CHUNK_SIZE = 1900
+    const chunks = []
+    const words = text.split(/\s+/)
+    let currentChunk = ''
+
+    for (const word of words) {
+      if (currentChunk.length + word.length + 1 > MAX_CHUNK_SIZE) {
+        if (currentChunk.trim()) {
+          chunks.push(currentChunk.trim())
+        }
+        currentChunk = word
+      } else {
+        currentChunk += (currentChunk ? ' ' : '') + word
+      }
+    }
+
+    if (currentChunk.trim()) {
+      chunks.push(currentChunk.trim())
+    }
+
+    return chunks
+  }
+
   const startTTS = async () => {
     if (!article || !apiKey) {
       setError('Please enter your Inworld API key in settings')
@@ -433,6 +543,7 @@ function App() {
     setDuration(0)
     setHasAudioContext(false)
     setUseNativeAudio(false)
+    setCurrentChunkIndex(-1)
     allAudioDataRef.current = []
     pendingBuffersRef.current = []
     scheduledEndTimeRef.current = 0
@@ -463,6 +574,10 @@ function App() {
         .filter(Boolean)
         .join('\n\n')
 
+      // Create text chunks for highlighting
+      const chunks = chunkText(fullText)
+      setTextChunks(chunks)
+
       const response = await fetch('/api/tts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -491,8 +606,9 @@ function App() {
           const data = JSON.parse(line)
 
           if (data.chunkComplete) {
-            // Update progress UI
+            // Update progress UI and current chunk highlighting
             setGenerationProgress({ current: data.chunkComplete, total: data.totalChunks })
+            setCurrentChunkIndex(data.chunkComplete - 1)
 
             // If user cancelled, abort now (after receiving current chunk's audio)
             if (isCancellingRef.current) {
@@ -522,7 +638,7 @@ function App() {
           } else if (data.error) {
             console.error('TTS error:', data.error)
           }
-        } catch (e) {
+        } catch {
           // Not valid JSON - might be partial, ignore
         }
       }
@@ -562,6 +678,7 @@ function App() {
       setIsCancelling(false)
       isCancellingRef.current = false
       abortControllerRef.current = null
+      setCurrentChunkIndex(-1) // Clear chunk highlighting
 
       // Always create blob from whatever audio we received.
       // Use detected format (not requested) to build the correct file.
@@ -771,13 +888,17 @@ function App() {
         </button>
 
         {article && (
-          <div className="article-preview">
+          <div className="article-preview" onClick={() => setShowArticleModal(true)}>
             <h3>{article.title}</h3>
             {article.subtitle && <p className="subtitle">{article.subtitle}</p>}
             <div className="body-preview">{article.body.slice(0, 500)}...</div>
             <div className="article-meta">
               <span>{article.wordCount.toLocaleString()} words</span>
               <span>~{Math.ceil(article.wordCount / 150)} min listen</span>
+              <div className="expand-hint">
+                <ExpandIcon />
+                <span>Click to view full article</span>
+              </div>
             </div>
           </div>
         )}
@@ -936,6 +1057,57 @@ function App() {
                   </button>
                 )}
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Article Modal */}
+      {showArticleModal && article && (
+        <div className="modal-overlay" onClick={() => setShowArticleModal(false)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <div className="modal-title">
+                <h2>{article.title}</h2>
+                {article.subtitle && <p className="modal-subtitle">{article.subtitle}</p>}
+              </div>
+              <button
+                className="modal-close"
+                onClick={() => setShowArticleModal(false)}
+                aria-label="Close modal"
+              >
+                <CloseIcon />
+              </button>
+            </div>
+            <div className="modal-body">
+              {textChunks.length > 0 ? (
+                <div className="article-text">
+                  {textChunks.map((chunk, index) => (
+                    <div
+                      key={index}
+                      className={`text-chunk ${
+                        index === currentChunkIndex ? 'current-chunk' : ''
+                      } ${
+                        index < currentChunkIndex ? 'completed-chunk' : ''
+                      }`}
+                    >
+                      {chunk.split('\n').map((paragraph, pIndex) => (
+                        paragraph.trim() ? <p key={pIndex}>{paragraph}</p> : null
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="article-text">
+                  {[article.title, article.subtitle, article.body]
+                    .filter(Boolean)
+                    .join('\n\n')
+                    .split('\n\n')
+                    .map((paragraph, index) => (
+                      paragraph.trim() ? <p key={index}>{paragraph}</p> : null
+                    ))}
+                </div>
+              )}
             </div>
           </div>
         </div>

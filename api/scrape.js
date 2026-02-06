@@ -54,9 +54,10 @@ export default async function handler(req, res) {
                      ''
 
     // Extract body content - Substack uses various class names
+    // Try specific selectors in order of specificity to avoid overlapping containers
     let bodyContainer = $('div.body.markup')
-    if (!bodyContainer.length) bodyContainer = $('div[class*="body"]').first()
-    if (!bodyContainer.length) bodyContainer = $('article .markup')
+    if (!bodyContainer.length) bodyContainer = $('.markup')
+    if (!bodyContainer.length) bodyContainer = $('article .available-content')
     if (!bodyContainer.length) bodyContainer = $('article')
 
     // Clone to avoid modifying original
@@ -87,10 +88,13 @@ export default async function handler(req, res) {
 
     // Get text content, preserving paragraph breaks
     let bodyText = ''
+    const processedTexts = new Set() // Track processed text to avoid duplicates
+
     bodyClone.find('p, h2, h3, h4, h5, h6, blockquote, li').each((_, el) => {
       const text = $(el).text().trim()
-      if (text) {
+      if (text && !processedTexts.has(text)) {
         bodyText += text + '\n\n'
+        processedTexts.add(text)
       }
     })
 
