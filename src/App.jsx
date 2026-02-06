@@ -177,8 +177,7 @@ function App() {
 
   // Modal and text display
   const [showArticleModal, setShowArticleModal] = useState(false)
-  const [currentChunkIndex, setCurrentChunkIndex] = useState(-1)
-  const [textChunks, setTextChunks] = useState([])
+
 
   // Article state
   const [url, setUrl] = useState('')
@@ -266,6 +265,45 @@ function App() {
     setError(null)
     setArticle(null)
 
+    // Reset audio state when fetching new article
+    setAudioBlob(null)
+    setIsPlaying(false)
+    setIsGenerating(false)
+    setCurrentTime(0)
+    setDuration(0)
+    setGenerationProgress({ current: 0, total: 0 })
+    setHasAudioContext(false)
+    setUseNativeAudio(false)
+    setIsCancelling(false)
+
+    // Clean up any existing audio
+    if (audioContextRef.current) {
+      audioContextRef.current.close()
+      audioContextRef.current = null
+    }
+    if (audioElementRef.current) {
+      audioElementRef.current.pause()
+      audioElementRef.current.src = ''
+      audioElementRef.current = null
+    }
+    if (animationFrameRef.current) {
+      cancelAnimationFrame(animationFrameRef.current)
+    }
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort()
+      abortControllerRef.current = null
+    }
+
+    // Reset refs
+    allAudioDataRef.current = []
+    pendingBuffersRef.current = []
+    scheduledEndTimeRef.current = 0
+    totalDurationRef.current = 0
+    isPlayingRef.current = false
+    playbackStartedRef.current = false
+    isCancellingRef.current = false
+    detectedFormatRef.current = null
+
     try {
       const response = await fetch('/api/scrape', {
         method: 'POST',
@@ -329,6 +367,7 @@ function App() {
       ctx.currentTime
     )
     source.start(startTime)
+
 
     scheduledEndTimeRef.current = startTime + audioBuffer.duration
     totalDurationRef.current += audioBuffer.duration
@@ -420,8 +459,10 @@ function App() {
 
     const elapsed = audioContextRef.current.currentTime - startTimeRef.current
     const totalDur = totalDurationRef.current
-    setCurrentTime(Math.min(elapsed, totalDur))
+    const currentPlayTime = Math.min(elapsed, totalDur)
+    setCurrentTime(currentPlayTime)
     setDuration(totalDur)
+
 
     // Detect when all scheduled Web Audio buffers have finished playing
     if (scheduledEndTimeRef.current > 0 &&
@@ -434,98 +475,6 @@ function App() {
     animationFrameRef.current = requestAnimationFrame(updatePlaybackTime)
   }, [])
 
-  // Function to split text into chunks (matching backend logic)
-  const chunkText = (text) => {
-    const MAX_CHUNK_SIZE = 1900
-    const chunks = []
-    const paragraphs = text.split(/\n\n+/)
-    let currentChunk = ''
-
-    for (const paragraph of paragraphs) {
-      const trimmedPara = paragraph.trim()
-      if (!trimmedPara) continue
-
-      if (currentChunk.length + trimmedPara.length + 2 > MAX_CHUNK_SIZE) {
-        if (currentChunk.trim()) {
-          chunks.push(currentChunk.trim())
-          currentChunk = ''
-        }
-
-        if (trimmedPara.length > MAX_CHUNK_SIZE) {
-          const subChunks = chunkLongParagraph(trimmedPara)
-          chunks.push(...subChunks)
-        } else {
-          currentChunk = trimmedPara
-        }
-      } else {
-        currentChunk += (currentChunk ? '\n\n' : '') + trimmedPara
-      }
-    }
-
-    if (currentChunk.trim()) {
-      chunks.push(currentChunk.trim())
-    }
-
-    return chunks
-  }
-
-  const chunkLongParagraph = (paragraph) => {
-    const MAX_CHUNK_SIZE = 1900
-    const chunks = []
-    const sentences = paragraph.match(/[^.!?]+[.!?]+[\s]*/g) || [paragraph]
-    let currentChunk = ''
-
-    for (const sentence of sentences) {
-      const trimmedSentence = sentence.trim()
-      if (!trimmedSentence) continue
-
-      if (currentChunk.length + trimmedSentence.length + 1 > MAX_CHUNK_SIZE) {
-        if (currentChunk.trim()) {
-          chunks.push(currentChunk.trim())
-          currentChunk = ''
-        }
-
-        if (trimmedSentence.length > MAX_CHUNK_SIZE) {
-          const wordChunks = chunkByWords(trimmedSentence)
-          chunks.push(...wordChunks)
-        } else {
-          currentChunk = trimmedSentence
-        }
-      } else {
-        currentChunk += (currentChunk ? ' ' : '') + trimmedSentence
-      }
-    }
-
-    if (currentChunk.trim()) {
-      chunks.push(currentChunk.trim())
-    }
-
-    return chunks
-  }
-
-  const chunkByWords = (text) => {
-    const MAX_CHUNK_SIZE = 1900
-    const chunks = []
-    const words = text.split(/\s+/)
-    let currentChunk = ''
-
-    for (const word of words) {
-      if (currentChunk.length + word.length + 1 > MAX_CHUNK_SIZE) {
-        if (currentChunk.trim()) {
-          chunks.push(currentChunk.trim())
-        }
-        currentChunk = word
-      } else {
-        currentChunk += (currentChunk ? ' ' : '') + word
-      }
-    }
-
-    if (currentChunk.trim()) {
-      chunks.push(currentChunk.trim())
-    }
-
-    return chunks
-  }
 
   const startTTS = async () => {
     if (!article || !apiKey) {
@@ -543,7 +492,6 @@ function App() {
     setDuration(0)
     setHasAudioContext(false)
     setUseNativeAudio(false)
-    setCurrentChunkIndex(-1)
     allAudioDataRef.current = []
     pendingBuffersRef.current = []
     scheduledEndTimeRef.current = 0
@@ -574,9 +522,6 @@ function App() {
         .filter(Boolean)
         .join('\n\n')
 
-      // Create text chunks for highlighting
-      const chunks = chunkText(fullText)
-      setTextChunks(chunks)
 
       const response = await fetch('/api/tts', {
         method: 'POST',
@@ -606,9 +551,8 @@ function App() {
           const data = JSON.parse(line)
 
           if (data.chunkComplete) {
-            // Update progress UI and current chunk highlighting
+            // Update progress UI
             setGenerationProgress({ current: data.chunkComplete, total: data.totalChunks })
-            setCurrentChunkIndex(data.chunkComplete - 1)
 
             // If user cancelled, abort now (after receiving current chunk's audio)
             if (isCancellingRef.current) {
@@ -727,9 +671,13 @@ function App() {
     const audio = new Audio(URL.createObjectURL(blob))
     audioElementRef.current = audio
 
-    audio.addEventListener('timeupdate', () => {
-      setCurrentTime(audio.currentTime)
-    })
+    const handleTimeUpdate = () => {
+      const currentPlayTime = audio.currentTime
+      setCurrentTime(currentPlayTime)
+
+    }
+
+    audio.addEventListener('timeupdate', handleTimeUpdate)
 
     audio.addEventListener('loadedmetadata', () => {
       const dur = isFinite(audio.duration) ? audio.duration : totalDurationRef.current
@@ -804,11 +752,14 @@ function App() {
 
     if (useNativeAudio && audioElementRef.current && duration) {
       // Already on native audio - just seek
-      audioElementRef.current.currentTime = percent * duration
+      const seekTime = percent * duration
+      audioElementRef.current.currentTime = seekTime
+
     } else if (audioBlob && !isGenerating) {
       // Switch to native audio for seeking (Web Audio doesn't support seek)
       const seekTo = percent * totalDurationRef.current
       switchToNativeAudio(audioBlob, seekTo)
+
     }
   }
 
@@ -976,14 +927,14 @@ function App() {
       </div>
 
       {/* Generate button */}
-      {article && !audioBlob && !isGenerating && (
+      {article && (
         <button
           className="btn btn-primary btn-full"
           onClick={startTTS}
-          disabled={!canPlay}
+          disabled={!canPlay || audioBlob || isGenerating}
           style={{ marginBottom: 16 }}
         >
-          Generate Audio
+          {audioBlob ? 'Audio Generated' : isGenerating ? 'Generating...' : 'Generate Audio'}
         </button>
       )}
 
@@ -1080,34 +1031,15 @@ function App() {
               </button>
             </div>
             <div className="modal-body">
-              {textChunks.length > 0 ? (
-                <div className="article-text">
-                  {textChunks.map((chunk, index) => (
-                    <div
-                      key={index}
-                      className={`text-chunk ${
-                        index === currentChunkIndex ? 'current-chunk' : ''
-                      } ${
-                        index < currentChunkIndex ? 'completed-chunk' : ''
-                      }`}
-                    >
-                      {chunk.split('\n').map((paragraph, pIndex) => (
-                        paragraph.trim() ? <p key={pIndex}>{paragraph}</p> : null
-                      ))}
-                    </div>
+              <div className="article-text">
+                {[article.title, article.subtitle, article.body]
+                  .filter(Boolean)
+                  .join('\n\n')
+                  .split('\n\n')
+                  .map((paragraph, index) => (
+                    paragraph.trim() ? <p key={index}>{paragraph}</p> : null
                   ))}
-                </div>
-              ) : (
-                <div className="article-text">
-                  {[article.title, article.subtitle, article.body]
-                    .filter(Boolean)
-                    .join('\n\n')
-                    .split('\n\n')
-                    .map((paragraph, index) => (
-                      paragraph.trim() ? <p key={index}>{paragraph}</p> : null
-                    ))}
-                </div>
-              )}
+              </div>
             </div>
           </div>
         </div>

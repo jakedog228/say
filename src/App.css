@@ -718,23 +718,6 @@
   margin-bottom: 0;
 }
 
-/* Text chunk highlighting */
-.text-chunk {
-  transition: all 0.3s ease;
-  border-radius: var(--radius-sm);
-  padding: 8px;
-  margin: -8px;
-}
-
-.text-chunk.current-chunk {
-  background: var(--accent-light);
-  border: 1px solid var(--accent);
-  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.1);
-}
-
-.text-chunk.completed-chunk {
-  opacity: 0.6;
-}
 
 /* Mobile modal adjustments */
 @media (max-width: 480px) {
