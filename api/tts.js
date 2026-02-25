@@ -1,6 +1,4 @@
-// Using Node.js runtime for reliable streaming
 export const config = {
-  runtime: 'nodejs',
   maxDuration: 300 // 5 minutes for long articles
 }
 

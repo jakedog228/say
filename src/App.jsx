@@ -55,12 +55,17 @@ const HeadphonesIcon = () => (
 const THEMES = ['light', 'dusk', 'midnight']
 const THEME_LABELS = { light: 'Light', dusk: 'Dusk', midnight: 'Midnight' }
 
-const VOICES = [
-  { id: 'Mark', name: 'Mark', desc: 'Natural male' },
-  { id: 'Olivia', name: 'Olivia', desc: 'Natural female' },
-  { id: 'James', name: 'James', desc: 'British male' },
-  { id: 'Sofia', name: 'Sofia', desc: 'Warm female' },
-]
+const PreviewIcon = ({ cached }) => (
+  <svg viewBox="0 0 24 24" fill={cached ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" width="16" height="16">
+    <polygon points="5 3 19 12 5 21 5 3"/>
+  </svg>
+)
+
+const PinIcon = ({ pinned }) => (
+  <svg viewBox="0 0 24 24" fill={pinned ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" width="16" height="16">
+    <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+  </svg>
+)
 
 function formatTime(seconds) {
   if (!seconds || !isFinite(seconds)) return '0:00'
@@ -175,6 +180,30 @@ function App() {
   )
   const [showSettings, setShowSettings] = useState(false)
 
+  // Dynamic voices
+  const [dynamicVoices, setDynamicVoices] = useState([])
+  const [voicesLoading, setVoicesLoading] = useState(false)
+  const [voicesError, setVoicesError] = useState(null)
+  const [showVoiceModal, setShowVoiceModal] = useState(false)
+  const [previewingVoice, setPreviewingVoice] = useState(null)
+  const [voiceSearch, setVoiceSearch] = useState('')
+  const [favoriteVoices, setFavoriteVoices] = useState(() => {
+    try {
+      const saved = localStorage.getItem('say-favorite-voices')
+      return saved ? JSON.parse(saved) : []
+    } catch {
+      return []
+    }
+  })
+  const [voicePreviewCache, setVoicePreviewCache] = useState(() => {
+    try {
+      const cached = localStorage.getItem('say-voice-previews')
+      return cached ? JSON.parse(cached) : {}
+    } catch {
+      return {}
+    }
+  })
+
   // Modal and text display
   const [showArticleModal, setShowArticleModal] = useState(false)
 
@@ -184,6 +213,11 @@ function App() {
   const [article, setArticle] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
+
+  // Custom text input
+  const [inputMode, setInputMode] = useState('url')
+  const [customTitle, setCustomTitle] = useState('')
+  const [customText, setCustomText] = useState('')
 
   // Audio state
   const [isPlaying, setIsPlaying] = useState(false)
@@ -213,6 +247,7 @@ function App() {
   const wakeLockRef = useRef(null)
   const [wasInterrupted, setWasInterrupted] = useState(false)
   const wasPlayingBeforeInterruption = useRef(false)
+  const previewAudioRef = useRef(null)
 
   const BUFFER_BEFORE_PLAY = 5  // Wait for N audio segments before starting
   const CROSSFADE_DURATION = 0.005  // 5ms crossfade to eliminate clicks at buffer boundaries
@@ -353,6 +388,216 @@ function App() {
       setError(err.message)
     } finally {
       setLoading(false)
+    }
+  }
+
+  const useCustomText = () => {
+    if (!customText.trim()) return
+
+    setError(null)
+    setArticle(null)
+
+    // Reset audio state (same pattern as scrapeArticle)
+    setAudioBlob(null)
+    setIsPlaying(false)
+    setIsGenerating(false)
+    setCurrentTime(0)
+    setDuration(0)
+    setGenerationProgress({ current: 0, total: 0 })
+    setHasAudioContext(false)
+    setUseNativeAudio(false)
+    setIsCancelling(false)
+    setWasInterrupted(false)
+    wasPlayingBeforeInterruption.current = false
+
+    if (audioContextRef.current) {
+      audioContextRef.current.close()
+      audioContextRef.current = null
+    }
+    if (audioElementRef.current) {
+      audioElementRef.current.pause()
+      audioElementRef.current.src = ''
+      audioElementRef.current = null
+    }
+    if (animationFrameRef.current) {
+      cancelAnimationFrame(animationFrameRef.current)
+    }
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort()
+      abortControllerRef.current = null
+    }
+
+    allAudioDataRef.current = []
+    pendingBuffersRef.current = []
+    scheduledEndTimeRef.current = 0
+    totalDurationRef.current = 0
+    isPlayingRef.current = false
+    playbackStartedRef.current = false
+    isCancellingRef.current = false
+    detectedFormatRef.current = null
+
+    const body = customText.trim()
+    const wordCount = body.split(/\s+/).filter(Boolean).length
+
+    setArticle({
+      title: customTitle.trim() || 'Custom Text',
+      subtitle: '',
+      body,
+      wordCount,
+      url: null
+    })
+  }
+
+  // Voice fetching and preview
+  const fetchVoices = async () => {
+    if (!apiKey) {
+      setVoicesError('Please enter your API key first')
+      return
+    }
+
+    setVoicesLoading(true)
+    setVoicesError(null)
+
+    try {
+      const response = await fetch('/api/voices', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apiKey })
+      })
+
+      if (!response.ok) {
+        const data = await response.json()
+        throw new Error(data.error || 'Failed to fetch voices')
+      }
+
+      const data = await response.json()
+      const voices = (data.voices || []).map(v => ({
+        id: v.voiceId,
+        name: v.displayName,
+        desc: v.description || '',
+        tags: v.tags || [],
+        isCustom: v.isCustom || false
+      }))
+
+      setDynamicVoices(voices)
+    } catch (err) {
+      setVoicesError(err.message)
+    } finally {
+      setVoicesLoading(false)
+    }
+  }
+
+  const toggleFavorite = (voiceId) => {
+    const updated = favoriteVoices.includes(voiceId)
+      ? favoriteVoices.filter(id => id !== voiceId)
+      : [...favoriteVoices, voiceId]
+    setFavoriteVoices(updated)
+    localStorage.setItem('say-favorite-voices', JSON.stringify(updated))
+  }
+
+  const playPreviewAudio = (blob) => {
+    if (previewAudioRef.current) {
+      previewAudioRef.current.pause()
+      previewAudioRef.current = null
+    }
+
+    const audio = new Audio(URL.createObjectURL(blob))
+    previewAudioRef.current = audio
+    audio.addEventListener('ended', () => {
+      previewAudioRef.current = null
+    })
+    audio.play()
+  }
+
+  const playPreviewFromCache = (voiceId) => {
+    const base64 = voicePreviewCache[voiceId]
+    if (!base64) return
+
+    const binaryString = atob(base64)
+    const bytes = new Uint8Array(binaryString.length)
+    for (let i = 0; i < binaryString.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i)
+    }
+    playPreviewAudio(new Blob([bytes], { type: 'audio/mpeg' }))
+  }
+
+  const previewVoice = async (voiceId) => {
+    if (!apiKey) return
+
+    if (voicePreviewCache[voiceId]) {
+      playPreviewFromCache(voiceId)
+      return
+    }
+
+    setPreviewingVoice(voiceId)
+
+    try {
+      const response = await fetch('/api/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: 'Hello! This is a preview of my voice. I hope you enjoy listening.',
+          voice_id: voiceId,
+          apiKey,
+          audioEncoding: 'MP3'
+        })
+      })
+
+      if (!response.ok) throw new Error('Preview failed')
+
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      const audioChunks = []
+
+      while (true) {
+        const { value, done } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+        let newlineIndex
+        while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
+          const line = buffer.slice(0, newlineIndex)
+          buffer = buffer.slice(newlineIndex + 1)
+          if (!line.trim()) continue
+
+          try {
+            const data = JSON.parse(line)
+            if (data.result?.audioContent) {
+              const binaryString = atob(data.result.audioContent)
+              const bytes = new Uint8Array(binaryString.length)
+              for (let i = 0; i < binaryString.length; i++) {
+                bytes[i] = binaryString.charCodeAt(i)
+              }
+              audioChunks.push(bytes)
+            }
+          } catch {
+            // not JSON, skip
+          }
+        }
+      }
+
+      if (audioChunks.length > 0) {
+        const blob = new Blob(audioChunks, { type: 'audio/mpeg' })
+
+        // Cache as base64 in localStorage
+        const arrayBuffer = await blob.arrayBuffer()
+        const base64 = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)))
+
+        const newCache = { ...voicePreviewCache, [voiceId]: base64 }
+        setVoicePreviewCache(newCache)
+        try {
+          localStorage.setItem('say-voice-previews', JSON.stringify(newCache))
+        } catch {
+          // localStorage full - still have it in state for this session
+        }
+
+        playPreviewAudio(blob)
+      }
+    } catch (err) {
+      console.error('Voice preview error:', err)
+    } finally {
+      setPreviewingVoice(null)
     }
   }
 
@@ -708,7 +953,6 @@ function App() {
       setIsCancelling(false)
       isCancellingRef.current = false
       abortControllerRef.current = null
-      setCurrentChunkIndex(-1) // Clear chunk highlighting
 
       // Always create blob from whatever audio we received.
       // Use detected format (not requested) to build the correct file.
@@ -1020,6 +1264,10 @@ function App() {
         wakeLockRef.current.release()
         wakeLockRef.current = null
       }
+      if (previewAudioRef.current) {
+        previewAudioRef.current.pause()
+        previewAudioRef.current = null
+      }
     }
   }, [])
 
@@ -1041,35 +1289,86 @@ function App() {
         </div>
       )}
 
-      {/* URL Input Card */}
+      {/* Article Input Card */}
       <div className="card">
         <div className="card-header">
           <h2>Article</h2>
         </div>
 
-        <div className="input-group">
-          <label>Substack URL</label>
-          <input
-            type="url"
-            placeholder="https://example.substack.com/p/article-title"
-            value={url}
-            onChange={(e) => setUrl(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && scrapeArticle()}
-          />
+        <div className="input-tabs">
+          <button
+            className={`input-tab ${inputMode === 'url' ? 'active' : ''}`}
+            onClick={() => setInputMode('url')}
+          >
+            URL
+          </button>
+          <button
+            className={`input-tab ${inputMode === 'text' ? 'active' : ''}`}
+            onClick={() => setInputMode('text')}
+          >
+            Text
+          </button>
         </div>
 
-        <button
-          className="btn btn-primary btn-full"
-          onClick={scrapeArticle}
-          disabled={!url || loading}
-        >
-          {loading ? (
-            <>
-              <span className="spinner" />
-              Fetching...
-            </>
-          ) : 'Fetch Article'}
-        </button>
+        {inputMode === 'url' && (
+          <>
+            <div className="input-group">
+              <label>Substack URL</label>
+              <input
+                type="url"
+                placeholder="https://example.substack.com/p/article-title"
+                value={url}
+                onChange={(e) => setUrl(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && scrapeArticle()}
+              />
+            </div>
+
+            <button
+              className="btn btn-primary btn-full"
+              onClick={scrapeArticle}
+              disabled={!url || loading}
+            >
+              {loading ? (
+                <>
+                  <span className="spinner" />
+                  Fetching...
+                </>
+              ) : 'Fetch Article'}
+            </button>
+          </>
+        )}
+
+        {inputMode === 'text' && (
+          <>
+            <div className="input-group">
+              <label>Title (optional)</label>
+              <input
+                type="text"
+                placeholder="Enter a title for your text"
+                value={customTitle}
+                onChange={(e) => setCustomTitle(e.target.value)}
+              />
+            </div>
+            <div className="input-group">
+              <label>Text</label>
+              <textarea
+                className="custom-text-input"
+                placeholder="Paste or type your text here..."
+                value={customText}
+                onChange={(e) => setCustomText(e.target.value)}
+                rows={8}
+              />
+            </div>
+
+            <button
+              className="btn btn-primary btn-full"
+              onClick={useCustomText}
+              disabled={!customText.trim()}
+            >
+              Use Text
+            </button>
+          </>
+        )}
 
         {article && (
           <div className="article-preview" onClick={() => setShowArticleModal(true)}>
@@ -1122,17 +1421,24 @@ function App() {
 
             <div className="input-group">
               <label>Voice</label>
-              <div className="voice-grid">
-                {VOICES.map(v => (
-                  <button
-                    key={v.id}
-                    className={`voice-option ${voice === v.id ? 'selected' : ''}`}
-                    onClick={() => setVoice(v.id)}
-                  >
-                    <div className="name">{v.name}</div>
-                    <div className="desc">{v.desc}</div>
-                  </button>
-                ))}
+              <div className="voice-selector-row">
+                <div className="voice-selected">
+                  <span className="name">{voice}</span>
+                  {dynamicVoices.length > 0 && (
+                    <span className="desc">
+                      {dynamicVoices.find(v => v.id === voice)?.desc || ''}
+                    </span>
+                  )}
+                </div>
+                <button
+                  className="btn btn-secondary"
+                  onClick={() => {
+                    if (dynamicVoices.length === 0 && apiKey) fetchVoices()
+                    setShowVoiceModal(true)
+                  }}
+                >
+                  {dynamicVoices.length > 0 ? 'Change' : 'Browse Voices'}
+                </button>
               </div>
             </div>
 
@@ -1193,9 +1499,9 @@ function App() {
       {!article && !loading && (
         <div className="empty-state">
           <HeadphonesIcon />
-          <p>Paste a Substack URL above to get started</p>
+          <p>Paste a Substack URL or enter text above to get started</p>
           <p style={{ fontSize: 13 }}>
-            Your articles will be read aloud using AI
+            Your text will be read aloud using AI
           </p>
         </div>
       )}
@@ -1295,6 +1601,145 @@ function App() {
           </div>
         </div>
       )}
+
+      {/* Voice Selection Modal */}
+      {showVoiceModal && (() => {
+        const query = voiceSearch.toLowerCase()
+        const filtered = dynamicVoices.filter(v =>
+          !query ||
+          v.name.toLowerCase().includes(query) ||
+          v.desc.toLowerCase().includes(query) ||
+          v.tags.some(t => t.toLowerCase().includes(query))
+        )
+        const favorites = filtered.filter(v => favoriteVoices.includes(v.id))
+        const others = filtered.filter(v => !favoriteVoices.includes(v.id))
+
+        const renderVoiceItem = (v) => (
+          <div
+            key={v.id}
+            className={`voice-list-item ${voice === v.id ? 'selected' : ''}`}
+            onClick={() => setVoice(v.id)}
+          >
+            <div className="voice-list-info">
+              <div className="name">{v.name}</div>
+              {v.desc && <div className="desc">{v.desc}</div>}
+              {v.tags.length > 0 && (
+                <div className="voice-tags">
+                  {v.tags.map(tag => (
+                    <span key={tag} className="voice-tag">{tag}</span>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="voice-list-actions">
+              <button
+                className="btn btn-ghost voice-pin-btn"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  toggleFavorite(v.id)
+                }}
+                title={favoriteVoices.includes(v.id) ? 'Remove from favorites' : 'Add to favorites'}
+              >
+                <PinIcon pinned={favoriteVoices.includes(v.id)} />
+              </button>
+              <button
+                className="btn btn-ghost voice-preview-btn"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  previewVoice(v.id)
+                }}
+                disabled={previewingVoice === v.id}
+                title={voicePreviewCache[v.id] ? 'Play cached preview' : 'Generate preview'}
+              >
+                {previewingVoice === v.id ? (
+                  <span className="spinner" />
+                ) : (
+                  <PreviewIcon cached={!!voicePreviewCache[v.id]} />
+                )}
+              </button>
+              {voice === v.id && <span className="voice-check">&#10003;</span>}
+            </div>
+          </div>
+        )
+
+        return (
+          <div className="modal-overlay" onClick={() => setShowVoiceModal(false)}>
+            <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+              <div className="modal-header">
+                <div className="modal-title">
+                  <h2>Choose a Voice</h2>
+                </div>
+                <button
+                  className="modal-close"
+                  onClick={() => setShowVoiceModal(false)}
+                  aria-label="Close modal"
+                >
+                  <CloseIcon />
+                </button>
+              </div>
+
+              {dynamicVoices.length > 0 && (
+                <div className="voice-search">
+                  <input
+                    type="text"
+                    placeholder="Search voices..."
+                    value={voiceSearch}
+                    onChange={(e) => setVoiceSearch(e.target.value)}
+                  />
+                </div>
+              )}
+
+              <div className="modal-body">
+                {voicesError && (
+                  <div className="status status-error" style={{ margin: '16px' }}>
+                    {voicesError}
+                  </div>
+                )}
+
+                {voicesLoading && (
+                  <div className="status status-loading" style={{ margin: '16px' }}>
+                    <span className="spinner" />
+                    Loading voices...
+                  </div>
+                )}
+
+                {!voicesLoading && dynamicVoices.length === 0 && !voicesError && (
+                  <div className="empty-state" style={{ padding: '24px' }}>
+                    <p>No voices loaded yet</p>
+                    <button
+                      className="btn btn-primary"
+                      onClick={fetchVoices}
+                      disabled={!apiKey}
+                      style={{ marginTop: '12px' }}
+                    >
+                      {apiKey ? 'Load Voices' : 'Enter API key first'}
+                    </button>
+                  </div>
+                )}
+
+                {dynamicVoices.length > 0 && filtered.length === 0 && (
+                  <div className="empty-state" style={{ padding: '24px' }}>
+                    <p>No voices match "{voiceSearch}"</p>
+                  </div>
+                )}
+
+                {filtered.length > 0 && (
+                  <div className="voice-list">
+                    {favorites.length > 0 && (
+                      <>
+                        <div className="voice-list-section">Favorites</div>
+                        {favorites.map(renderVoiceItem)}
+                        {others.length > 0 && <div className="voice-list-section">All Voices</div>}
+                      </>
+                    )}
+                    {others.map(renderVoiceItem)}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )
+      })()}
     </div>
   )
 }
